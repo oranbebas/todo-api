@@ -1,16 +1,31 @@
 """
+Features
+- Base URL is "http://localhost:5000/todo/api/vi/tasks".
+- Request and Response format is JSON.
+- Authorization is needed(miguel:python).
+- DB is MySQL.
+
+Request example
+- curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks -X GET
+- curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks/1 -X GET
+- curl -i -u miguel:python -H "Content-Type:application/json" http://localhost:5000/todo/api/v1/tasks -X POST -d '{"title":"test1"}'
+- curl -i -u miguel:python -H "Content-Type:application/json" http://localhost:5000/todo/api/v1/tasks/1 -X PUT -d '{"title":"test1"}'
+- curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks/1 -X DELETE
+
 Additional todo
-- Use database.
 - For multiple users, add resource "users".
 - Custmize GET request for "tasks", for example pagination, filtering by URL.
 """
 
 from flask import Flask, jsonify, abort, make_response, request, url_for
 from flask_httpauth import HTTPBasicAuth
-auth = HTTPBasicAuth()
-
+from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://root:@localhost/tutorial'
+#app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tutorial.db'
+db = SQLAlchemy(app)
+auth = HTTPBasicAuth()
 
 
 @auth.get_password
@@ -25,37 +40,49 @@ def unauthorized():
     return make_response(jsonify({'error': 'Unauthorized access'}, 401))
 
 
-tasks = [
-    {
-        'id': 1,
-        'title': 'Buy groceries',
-        'description': 'Milk, Cheese, Pizza, Fruit, Tylenol',
-        'done': False
-    },
-    {
-        'id': 2,
-        'title': 'Learn Python',
-        'description': 'Neet to find a good Python tutorial on the web',
-        'done': False
+class Task(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(100))
+    description = db.Column(db.Text)
+    done = db.Column(db.Boolean)
+    # done = db.Column(db.Integer) # For SQLite
+
+    def __init__(self, title="", description="", done=""):
+        self.title = title
+        self.description = description
+        self.done = done
+
+    def __repr__(self):
+        return '<Task id:{}, title:{}, description:{}, done:{}>'.format(self.id, self.title, self.description, self.done)
+
+    def model2dict(self):
+        task = {
+            'id': self.id,
+            'title': self.title,
+            'description': self.description,
+            'done': self.done
         }
-]
+        return task
+
+tasks = []
 
 
 @app.route('/todo/api/v1/tasks', methods=['GET'])
 @auth.login_required
 def get_tasks():
+    # レコード参照
+    tasks = [task.model2dict() for task in Task.query.all()]
     return jsonify({'tasks': [make_public_task(task) for task in tasks]})
 
 
 @app.route('/todo/api/v1/tasks/<int:task_id>', methods=['GET'])
 @auth.login_required
 def get_task(task_id):
-    # リクエストチェック
-    task = [task for task in tasks if task['id'] == task_id]
-    if len(task) == 0:
+    # レコード参照
+    task = Task.query.get(task_id)
+    if not task:
         abort(404)
-
-    return jsonify({'tasks': make_public_task(task[0])})
+    return jsonify({'tasks': make_public_task(task.model2dict())})
 
 
 @app.route('/todo/api/v1/tasks', methods=['POST'])
@@ -71,15 +98,13 @@ def create_task():
     else:
         description = ''
 
-    task = {
-        'id': tasks[-1]['id'] + 1,
-        'title': request.get_json()['title'],
-        'description': description,
-        'done': False
-    }
-    tasks.append(task)
+    # レコード作成
+    task = Task(request.get_json()['title'], description, False)
+    db.session.add(task)
+    db.session.commit()
 
-    return jsonify({'task': make_public_task(task)}), 201
+
+    return jsonify({'task': make_public_task(task.model2dict())}), 201
 
 
 @app.route('/todo/api/v1/tasks/<int:task_id>', methods=['PUT'])
@@ -88,8 +113,10 @@ def update_task(task_id):
     # リクエストチェック
     if not request.is_json:
         abort(400)
-    task = [task for task in tasks if task['id'] == task_id]
-    if len(task) == 0:
+
+    # レコード参照
+    task = Task.query.get(task_id)
+    if not task:
         abort(404)
 
     # 送信項目ごとの形式チェック
@@ -100,27 +127,28 @@ def update_task(task_id):
     if 'done' in request.get_json() and type(request.get_json()['done']) != bool:
         abort(400)
 
-    # 送信項目ごとの更新
+    # レコード更新
     if 'title' in request.get_json():
-        task[0]['title'] = request.get_json()['title']
+        task.title = request.get_json()['title']
     if 'description' in request.get_json():
-        task[0]['description'] = request.get_json()['description']
+        task.description = request.get_json()['description']
     if 'done' in request.get_json():
-        task[0]['done'] = request.get_json()['done']
+        task.done = request.get_json()['done']
+    print(task.done)
+    db.session.commit()
 
-    return jsonify({'task': make_public_task(task[0])})
+    return jsonify({'task': make_public_task(task.model2dict())})
 
 
 @app.route('/todo/api/v1/tasks/<int:task_id>', methods=['DELETE'])
 @auth.login_required
 def delete_task(task_id):
-    # リクエストチェック
-    task = [task for task in tasks if task['id'] == task_id]
-    if len(task) == 0:
+    # レコード参照
+    task = Task.query.get(task_id)
+    if not task:
         abort(404)
-
-    tasks.remove(task[0])
-
+    db.session.delete(task)
+    db.session.commit()
     return jsonify({'result': True})
 
 
