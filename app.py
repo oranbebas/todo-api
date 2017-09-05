@@ -1,12 +1,15 @@
 """
 Features
-- Base URL is "http://localhost:5000/todo/api/v1/tasks".
+- Base URL is "http://localhost:5000/todo/api/v1".
 - Request and Response format is JSON.
 - Basic authentication is done by user. (curl -u [id]:[pass] ...)
-- Relationship is made, but it's not sure exactly made. (e.g. can't delete task, raise error.)
+- Relationship is made.
 - DB is MySQL.
 
 Request example
+- token
+    - curl -i -u miguel:python http://localhost:5000/todo/api/v1/token -X GET
+    - curl -i -u [token]:unused http://localhost:5000/todo/api/v1/xxxx -X GET
 - user
     - curl -i -u miguel:python http://localhost:5000/todo/api/v1/users -X GET
     - curl -i -u miguel:python http://localhost:5000/todo/api/v1/users/1 -X GET
@@ -29,8 +32,10 @@ from flask import Flask, jsonify, abort, make_response, request, url_for, g
 from flask_httpauth import HTTPBasicAuth
 from flask_sqlalchemy import SQLAlchemy
 from passlib.apps import custom_app_context as pwd_context
+from itsdangerous import(TimedJSONWebSignatureSerializer as Serializer, BadSignature, SignatureExpired)
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'the quick brown fox jumps over the lazy dog'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://root:@localhost/tutorial'
 #app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tutorial.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -40,10 +45,14 @@ auth = HTTPBasicAuth()
 
 
 @auth.verify_password
-def verify_password(username, password):
-    user = User.query.filter_by(username=username).first()
-    if not user or not user.verify_password(password):
-        return False
+def verify_password(username_or_token, password):
+    # first try to authenticate by token
+    user = User.verify_auth_token(username_or_token)
+    if not user:
+        # try to authenticate with username/password
+        user = User.query.filter_by(username=username_or_token).first()
+        if not user or not user.verify_password(password):
+            return False
     g.user = user
     return True
 
@@ -72,6 +81,22 @@ class User(db.Model):
     def verify_password(self, password):
         return pwd_context.verify(password, self.password_hash)
 
+    def generate_auth_token(self, expiration=600):
+        s = Serializer(app.config['SECRET_KEY'], expires_in=expiration)
+        return s.dumps({'id': self.id})
+
+    @staticmethod
+    def verify_auth_token(token):
+        s = Serializer(app.config['SECRET_KEY'])
+        try:
+            data = s.loads(token)
+        except SignatureExpired:
+            return None
+        except BadSignature:
+            return None
+        user = User.query.get(data['id'])
+        return user
+
 
 class Task(db.Model):
     __tablename__ = 'task'
@@ -98,6 +123,12 @@ def model2dict(model):
         model.__dict__.pop("_sa_instance_state")
     return model.__dict__
 
+
+@app.route('/todo/api/v1/token')
+@auth.login_required
+def get_auth_token():
+    token = g.user.generate_auth_token()
+    return jsonify({'token': token.decode('ascii')})
 
 @app.route('/todo/api/v1/users', methods=['GET'])
 @auth.login_required
@@ -183,16 +214,18 @@ def delete_user(user_id):
 @auth.login_required
 def get_tasks():
     # レコード参照
-    user = User.query.filter_by(username=auth.username()).first()
-    tasks = [model2dict(task) for task in Task.query.filter_by(user_id=user.id)]
+    #user = User.query.filter_by(username=auth.username()).first()  # For BasicAuth
+    #tasks = [model2dict(task) for task in Task.query.filter_by(user_id=user.id)]  # For BasicAuth
+    tasks = [model2dict(task) for task in Task.query.all()]
     return jsonify({'tasks': [make_public_task(task) for task in tasks]})
 
 @app.route('/todo/api/v1/tasks/<int:task_id>', methods=['GET'])
 @auth.login_required
 def get_task(task_id):
     # レコード参照
-    user = User.query.filter_by(username=auth.username()).first()
-    task = Task.query.filter_by(id=task_id, user_id=user.id).first()
+    #user = User.query.filter_by(username=auth.username()).first()  # For BasicAuth
+    #task = Task.query.filter_by(id=task_id, user_id=user.id).first()  # For BasicAuth
+    task = Task.query.get(task_id)
     if not task:
         abort(404)
     return jsonify({'tasks': make_public_task(model2dict(task))})
@@ -202,11 +235,15 @@ def get_task(task_id):
 @auth.login_required
 def create_task():
     # リクエストチェック -JSONかつtitle含む
-    if not request.is_json or 'title' not in request.get_json():
+    if not request.is_json:
+        abort(400)
+    if 'title' not in request.get_json():
+        abort(400)
+    if 'user_id' not in request.get_json():
         abort(400)
 
     # レコード参照
-    user = User.query.filter_by(username=auth.username()).first()
+    #user = User.query.filter_by(username=auth.username()).first()  # For BasicAuth
 
     # descriptionがあれば代入
     if 'description' in request.get_json():
@@ -215,7 +252,8 @@ def create_task():
         description = ''
 
     # レコード作成
-    task = Task(request.get_json()['title'], description, False, user.id)
+    #task = Task(request.get_json()['title'], description, False, user.id)  # For BasicAuth
+    task = Task(request.get_json()['title'], description, False, request.get_json()['user_id'])
     db.session.add(task)
     db.session.commit()
 
@@ -232,8 +270,9 @@ def update_task(task_id):
         abort(400)
 
     # レコード参照
-    user = User.query.filter_by(username=auth.username()).first()
-    task = Task.query.filter_by(id=task_id, user_id=user.id).first()
+    #user = User.query.filter_by(username=auth.username()).first()  # For BasicAuth
+    #task = Task.query.filter_by(id=task_id, user_id=user.id).first()  # For BasicAuth
+    task = Task.query.get(task_id)
     if not task:
         abort(404)
 
@@ -263,8 +302,9 @@ def update_task(task_id):
 @auth.login_required
 def delete_task(task_id):
     # レコード参照
-    user = User.query.filter_by(username=auth.username()).first()
-    task = Task.query.filter_by(id=task_id, user_id=user.id).first()
+    #user = User.query.filter_by(username=auth.username()).first()  # For BasicAuth
+    #task = Task.query.filter_by(id=task_id, user_id=user.id).first()  # For BasicAuth
+    task = Task.query.get(task_id)
     if not task:
         abort(404)
     db.session.delete(task)
