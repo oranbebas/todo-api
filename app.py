@@ -1,42 +1,51 @@
 """
 Features
-- Base URL is "http://localhost:5000/todo/api/vi/tasks".
+- Base URL is "http://localhost:5000/todo/api/v1/tasks".
 - Request and Response format is JSON.
-- Authorization is done by user. (curl -u [id]:[pass] ...)
+- Basic authentication is done by user. (curl -u [id]:[pass] ...)
 - Relationship is made, but it's not sure exactly made. (e.g. can't delete task, raise error.)
 - DB is MySQL.
 
 Request example
-- curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks -X GET
-- curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks/1 -X GET
-- curl -i -u miguel:python -H "Content-Type:application/json" http://localhost:5000/todo/api/v1/tasks -X POST -d '{"title":"test1"}'
-- curl -i -u miguel:python -H "Content-Type:application/json" http://localhost:5000/todo/api/v1/tasks/1 -X PUT -d '{"title":"test1"}'
-- curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks/1 -X DELETE
+- user
+    - curl -i -u miguel:python http://localhost:5000/todo/api/v1/users -X GET
+    - curl -i -u miguel:python http://localhost:5000/todo/api/v1/users/1 -X GET
+    - curl -i -u miguel:python -H "Content-Type:application/json" http://localhost:5000/todo/api/v1/users -X POST -d '{"username":"miguel","password":"python"}'
+    - curl -i -u miguel:python -H "Content-Type:application/json" http://localhost:5000/todo/api/v1/users/1 -X PUT -d '{"username":"Miguel"}'
+    - curl -i -u miguel:python http://localhost:5000/todo/api/v1/users/1 -X DELETE
+- Task
+    - curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks -X GET
+    - curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks/1 -X GET
+    - curl -i -u miguel:python -H "Content-Type:application/json" http://localhost:5000/todo/api/v1/tasks -X POST -d '{"title":"test1"}'
+    - curl -i -u miguel:python -H "Content-Type:application/json" http://localhost:5000/todo/api/v1/tasks/1 -X PUT -d '{"title":"test1"}'
+    - curl -i -u miguel:python http://localhost:5000/todo/api/v1/tasks/1 -X DELETE
 
 Additional todo
 - Custmize GET request for "tasks", for example pagination, filtering by URL.
 - Error handling. (e.g. input format.)
 """
 
-from flask import Flask, jsonify, abort, make_response, request, url_for
+from flask import Flask, jsonify, abort, make_response, request, url_for, g
 from flask_httpauth import HTTPBasicAuth
 from flask_sqlalchemy import SQLAlchemy
+from passlib.apps import custom_app_context as pwd_context
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://root:@localhost/tutorial'
 #app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tutorial.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 db = SQLAlchemy(app)
 auth = HTTPBasicAuth()
 
 
-@auth.get_password
-def get_password(username):
-    users = User.query.all()
-    for user in users:
-        if user.login_id == username:
-            return user.password
-    return None
+@auth.verify_password
+def verify_password(username, password):
+    user = User.query.filter_by(username=username).first()
+    if not user or not user.verify_password(password):
+        return False
+    g.user = user
+    return True
 
 
 @auth.error_handler
@@ -45,24 +54,32 @@ def unauthorized():
 
 
 class User(db.Model):
+    __tablename__ = 'user'
     id = db.Column(db.Integer, primary_key=True)
-    login_id = db.Column(db.String(20), unique=True)
-    password = db.Column(db.String(20))
+    username = db.Column(db.String(32), index=True, unique=True)
+    password_hash = db.Column(db.String(256))
     task = db.relationship('Task', backref='user', lazy='dynamic')
 
-    def __init__(self, login_id="", password=""):
-        self.login_id = login_id
-        self.password = password
+    def __init__(self, username=""):
+        self.username = username
 
     def __repr__(self):
-        return '<User login_id:{}, password:{}>'.format(self.login_id, self.password)
+        return '<User username:{}, password_hash:{}>'.format(self.username, self.password_hash)
+
+    def hash_password(self, password):
+        self.password_hash = pwd_context.encrypt(password)
+
+    def verify_password(self, password):
+        return pwd_context.verify(password, self.password_hash)
 
 
 class Task(db.Model):
+    __tablename__ = 'task'
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(100))
     description = db.Column(db.Text)
     done = db.Column(db.Boolean)
+    #user = db.relationship('User', backref='task', lazy='dynamic')
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
 
 
@@ -73,8 +90,7 @@ class Task(db.Model):
         self.user_id = user_id
 
     def __repr__(self):
-        #return '<Task id:{}, title:{}, description:{}, done:{}>'.format(self.id, self.title, self.description, self.done)
-        return self.__dict__.pop("_sa_instance_state")
+        return '<Task id:{}, title:{}, description:{}, done:{}>'.format(self.id, self.title, self.description, self.done)
 
 
 def model2dict(model):
@@ -103,17 +119,23 @@ def get_user(user_id):
 @app.route('/todo/api/v1/users', methods=['POST'])
 @auth.login_required
 def create_user():
-    # リクエストチェック -JSONかつlogin_id, password含む
-    if not request.is_json or 'login_id' not in request.get_json() or 'password' not in request.get_json():
-        abort(400)
+    username = request.get_json()['username']
+    password = request.get_json()['password']
+    if not request.is_json:
+        abort(400)  # request is not json
+    if username is None or password is None:
+        abort(400)  # missing arguments
+    if User.query.filter_by(username=username).first() is not None:
+        abort(400)  # existing user
 
     # レコード作成
-    user = User(request.get_json()['login_id'], request.get_json()['password'])
+    user = User(username=username)
+    user.hash_password(password)
     db.session.add(user)
     db.session.commit()
-    print(user) # これがないとレスポンスボディのuser中身が表示されない
+    print(user)  # これがないとレスポンスボディのuser中身が表示されない
 
-    return jsonify({'users': model2dict(user)}), 201
+    return jsonify({'username': user.username}), 201, {'Location': url_for('get_user', user_id=user.id, _external=True)}
 
 
 @app.route('/todo/api/v1/users/<int:user_id>', methods=['PUT'])
@@ -129,17 +151,18 @@ def update_user(user_id):
         abort(404)
 
     # 送信項目ごとの形式チェック
-    if 'login_id' in request.get_json() and type(request.get_json()['login_id']) != str:
+    if 'username' in request.get_json() and type(request.get_json()['username']) != str:
         abort(400)
     if 'password' in request.get_json() and type(request.get_json()['password']) != str:
         abort(400)
 
     # レコード更新
-    if 'login_id' in request.get_json():
-        user.login_id = request.get_json()['login_id']
+    if 'username' in request.get_json():
+        user.username = request.get_json()['username']
     if 'password' in request.get_json():
         user.password = request.get_json()['password']
     db.session.commit()
+    print(user)  # これがないとレスポンスボディのuser中身が表示されない
 
     return jsonify({'users': model2dict(user)})
 
@@ -160,7 +183,7 @@ def delete_user(user_id):
 @auth.login_required
 def get_tasks():
     # レコード参照
-    user = User.query.filter_by(login_id=auth.username()).first()
+    user = User.query.filter_by(username=auth.username()).first()
     tasks = [model2dict(task) for task in Task.query.filter_by(user_id=user.id)]
     return jsonify({'tasks': [make_public_task(task) for task in tasks]})
 
@@ -168,7 +191,7 @@ def get_tasks():
 @auth.login_required
 def get_task(task_id):
     # レコード参照
-    user = User.query.filter_by(login_id=auth.username()).first()
+    user = User.query.filter_by(username=auth.username()).first()
     task = Task.query.filter_by(id=task_id, user_id=user.id).first()
     if not task:
         abort(404)
@@ -183,7 +206,7 @@ def create_task():
         abort(400)
 
     # レコード参照
-    user = User.query.filter_by(login_id=auth.username()).first()
+    user = User.query.filter_by(username=auth.username()).first()
 
     # descriptionがあれば代入
     if 'description' in request.get_json():
@@ -196,6 +219,8 @@ def create_task():
     db.session.add(task)
     db.session.commit()
 
+    print(task)  # これがないとレスポンスボディのtask中身が表示されない
+
     return jsonify({'task': make_public_task(model2dict(task))}), 201
 
 
@@ -207,7 +232,7 @@ def update_task(task_id):
         abort(400)
 
     # レコード参照
-    user = User.query.filter_by(login_id=auth.username()).first()
+    user = User.query.filter_by(username=auth.username()).first()
     task = Task.query.filter_by(id=task_id, user_id=user.id).first()
     if not task:
         abort(404)
@@ -229,6 +254,8 @@ def update_task(task_id):
         task.done = request.get_json()['done']
     db.session.commit()
 
+    print(task)  # これがないとレスポンスボディのtask中身が表示されない
+
     return jsonify({'task': make_public_task(model2dict(task))})
 
 
@@ -236,8 +263,8 @@ def update_task(task_id):
 @auth.login_required
 def delete_task(task_id):
     # レコード参照
-    user = User.query.filter_by(login_id=auth.username()).first()
-    task = Task.query.filter_by(id=task_id, user_id=user.id)
+    user = User.query.filter_by(username=auth.username()).first()
+    task = Task.query.filter_by(id=task_id, user_id=user.id).first()
     if not task:
         abort(404)
     db.session.delete(task)
